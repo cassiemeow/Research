@@ -1,0 +1,315 @@
+---
+title: "Subtype Classification"
+author: "Cassie Xu"
+date: "11/2/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, message = F)
+library(genefu)
+library(org.Hs.eg.db)
+library(dplyr)
+library(DESeq2)
+library(kableExtra)
+library(EBSeq) # normalization
+
+#### Import count matrix data
+gene = read.table("/Users/xuchenghuiyun/Desktop/research/genes.results.156samples.matrix.fixed.txt", sep = "", header = T)
+
+#### Load meta data
+meta = read.csv("/Users/xuchenghuiyun/Desktop/research/coldata_156samples_Cassie.csv")
+
+#### Load pam50 annotation and update to the newest version
+data("pam50.robust")
+pam50annot = pam50.robust$centroids.map
+pam50annot$probe = ifelse(pam50annot$probe=="CDCA1", "NUF2", 
+                            ifelse(pam50annot$probe=="KNTC2", "NDC80",
+                                   ifelse(pam50annot$probe=="ORC6L",
+                                          "ORC6", pam50annot$probe)))
+pam50annot$probe.centroids = pam50annot$probe
+rownames(pam50annot) = pam50annot$probe
+```
+
+### PAM50
+
+```{r example, eval = F}
+library(breastCancerMAINZ)
+library(breastCancerTRANSBIG)
+library(breastCancerUPP)
+library(breastCancerUNT)
+library(breastCancerNKI)
+data(breastCancerData)
+cinfo <- colnames(pData(mainz7g))
+data.all <- c("transbig7g"=transbig7g, "unt7g"=unt7g, "upp7g"=upp7g,
+              "mainz7g"=mainz7g, "nki7g"=nki7g)
+
+idtoremove.all <- NULL
+duplres <- NULL
+## No overlaps in the MainZ and NKI datasets.
+## Focus on UNT vs UPP vs TRANSBIG
+demo.all <- rbind(pData(transbig7g), pData(unt7g), pData(upp7g))
+dn2 <- c("TRANSBIG", "UNT", "UPP")
+## Karolinska
+## Search for the VDXKIU, KIU, UPPU series
+ds2 <- c("VDXKIU", "KIU", "UPPU")
+demot <- demo.all[complete.cases(demo.all[ , c("series")]) & is.element(demo.all[ , "series"], ds2), ]
+# Find the duplicated patients in that series
+duplid <- sort(unique(demot[duplicated(demot[ , "id"]), "id"]))
+duplrest <- NULL
+for(i in 1:length(duplid)) {
+  tt <- NULL
+  for(k in 1:length(dn2)) {
+    myx <- sort(row.names(demot)[complete.cases(demot[ , c("id", "dataset")]) &
+                                   demot[ , "id"] == duplid[i] & demot[ , "dataset"] == dn2[k]])
+    if(length(myx) > 0) { tt <- c(tt, myx) }
+  }
+  duplrest <- c(duplrest, list(tt))
+}
+names(duplrest) <- duplid
+duplres <- c(duplres, duplrest)
+## Oxford
+## Search for the VVDXOXFU, OXFU series
+ds2 <- c("VDXOXFU", "OXFU")
+demot <- demo.all[complete.cases(demo.all[ , c("series")]) & is.element(demo.all[ , "series"], ds2), ]
+
+# Find the duplicated patients in that series
+duplid <- sort(unique(demot[duplicated(demot[ , "id"]), "id"]))
+duplrest <- NULL
+for(i in 1:length(duplid)) {
+  tt <- NULL
+  for(k in 1:length(dn2)) {
+    myx <- sort(row.names(demot)[complete.cases(demot[ , c("id", "dataset")]) &
+                                   demot[ , "id"] == duplid[i] & demot[ , "dataset"] == dn2[k]])
+    if(length(myx) > 0) { tt <- c(tt, myx) }
+  }
+  duplrest <- c(duplrest, list(tt))
+}
+names(duplrest) <- duplid
+duplres <- c(duplres, duplrest)
+## Full set duplicated patients
+duPL <- sort(unlist(lapply(duplres, function(x) { return(x[-1]) } )))
+
+dn <- c("transbig", "unt", "upp", "mainz", "nki")
+dn.platform <- c("affy", "affy", "affy", "affy", "agilent")
+res <- ddemo.all <- ddemo.coln <- NULL
+for(i in 1:length(dn)) {
+  ## load dataset
+  dd <- get(data(list=dn[i]))
+  #Remove duplicates identified first
+  message("obtained dataset!")
+  #Extract expression set, pData, fData for each dataset
+  ddata <- t(exprs(dd))
+  ddemo <- phenoData(dd)@data
+  if(length(intersect(rownames(ddata),duPL))>0)
+  {
+    ddata<-ddata[-which(rownames(ddata) %in% duPL),]
+    ddemo<-ddemo[-which(rownames(ddemo) %in% duPL),]
+  }
+  dannot <- featureData(dd)@data
+}
+
+head(ddata[,1:10])
+dannot
+
+head(gene[,1:10])
+pam50annot
+```
+```{r makefunction, eval = F}
+pam50_class = function(countData = gene,
+                       annotation = pam50annot,
+                       AnnotationDbObject = org.Hs.eg.db,
+                       normalization = "all") {
+  
+  countData$symbol = mapIds(AnnotationDbObject,
+                       keys=rownames(countData),
+                       column="SYMBOL",
+                       keytype="ENSEMBL",
+                       multiVals="first")
+  ## warning: 'select()' returned 1: many mapping between keys and columns
+  ## this warning does not need to be taken care of.
+  
+  ## Filter out the 50 genes from our own data:
+  gene50 = countData[which(countData$symbol %in% annotation$probe),]
+  
+  ## Check if we have all 50 of them:
+  if (dim(gene50) != 50) {warning("Filtered out less than 50 genes.")}
+  
+  rownames(gene50) = gene50$symbol
+  gene50_t = t(gene50[-ncol(gene50)]) %>% as.data.frame()
+  
+  PAM50Preds = molecular.subtyping(sbt.model = "pam50", 
+                                   data = gene50_t,
+                                   annot = annotation,
+                                   do.mapping = TRUE)
+  
+  list(table(PAM50Preds$subtype),
+       PAM50Preds$subtype)
+}
+
+pam50_class()
+```
+
+#### Raw gene counts
+
+```{r}
+gene$symbol = mapIds(org.Hs.eg.db,
+                     keys=rownames(gene),
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+## warning: 'select()' returned 1: many mapping between keys and columns
+## this warning does not need to be taken care of.
+
+## Filter out the 50 genes from our own data:
+gene_out = gene[which(gene$symbol %in% pam50annot$probe),]
+
+## Check if we have all 50 of them:
+# dim(gene_out) ## it seems we only have 47 and the missing 3 are:
+# pam50annot$probe[which(!(pam50annot$probe %in% gene47$symbol))] 
+## "CDCA1" "KNTC2" "ORC6L"
+## this is due to the updated gene symbol names in org.Hs.eg.db database, but not in the pam50 dataset. Thus, we need to manually change their names:
+
+## First, check what their new names are:
+# gene[which(rownames(gene)=="ENSG00000143228"),] # "CDCA1" = "NUF2"
+# gene[which(rownames(gene)=="ENSG00000080986"),] # "KNTC2" = "NDC80"
+# gene[which(rownames(gene)=="ENSG00000091651"),] # "ORC6L" = "ORC6"
+
+## Update the names:
+pam50annot$probe = ifelse(pam50annot$probe=="CDCA1", "NUF2", 
+                           ifelse(pam50annot$probe=="KNTC2", "NDC80",
+                                  ifelse(pam50annot$probe=="ORC6L", "ORC6",
+                                         pam50annot$probe)))
+pam50annot$probe.centroids = pam50annot$probe
+rownames(pam50annot) = pam50annot$probe
+gene50 = gene[which(gene$symbol %in% pam50annot$probe),]
+# dim(gene50)
+
+rownames(gene50) = gene50$symbol
+gene50_t = t(gene50[-ncol(gene50)]) %>% as.data.frame()
+
+PAM50Preds = molecular.subtyping(sbt.model = "pam50", 
+                                 data = gene50_t,
+                                 annot = pam50annot,
+                                 do.mapping = TRUE)
+
+# table(PAM50Preds$subtype)
+out_raw = as.data.frame(PAM50Preds$subtype)
+colnames(out_raw) = "Raw Data"
+```
+
+#### Normalization with all the genes using Median of Ratios method
+
+```{r}
+### 1. DESeq2 built-in functions
+## select columns needed in meta data
+# meta_sub = meta[, c(1,2,8)]
+# meta_sub$rs140068132 = as.factor(as.character(meta_sub$rs140068132))
+
+## Create DESeq2Dataset object
+# dds = DESeq2::DESeqDataSetFromMatrix(countData = gene,
+#                                       colData = meta_sub,
+#                                       design = ~ rs140068132)
+## colData and design do not affect the normalization, referring to http://bioconductor.org/packages/release/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#do-normalized-counts-correct-for-variables-in-the-design
+
+## Normalization
+# dds = estimateSizeFactors(dds)
+# out_norm_DESeq2 = counts(dds, normalized = T)
+
+
+### 2. EBSeq::MedianNorm
+## source code:
+# geomeans = exp(rowMeans(log(Data)))
+# out = apply(Data, 2, function(x) median((x/geomeans)[geomeans > 0]))
+
+normFactors = MedianNorm(gene[-ncol(gene)], alternative = FALSE) # The alternative method is similar to median-by-ratio normalization, but can deal with the cases when all of the genes/isoforms have at least one zero counts (in which case the median-by-ratio normalization will fail)
+gene_norm = apply(gene[-ncol(gene)], 1, function(x){x/normFactors})
+gene_norm = as.data.frame(t(gene_norm))
+
+gene_norm$symbol = mapIds(org.Hs.eg.db,
+                     keys=rownames(gene_norm),
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+## Filter out the 50 genes from our own data:
+gene50 = gene_norm[which(gene_norm$symbol %in% pam50annot$probe),]
+rownames(gene50) = gene50$symbol
+gene50_t = t(gene50[-ncol(gene50)]) %>% as.data.frame()
+
+PAM50Preds = molecular.subtyping(sbt.model = "pam50", 
+                                 data = gene50_t,
+                                 annot = pam50annot,
+                                 do.mapping = TRUE)
+
+# table(PAM50Preds$subtype)
+out_norm_all = as.data.frame(PAM50Preds$subtype)
+colnames(out_norm_all) = "Normalized Data (all genes)"
+```
+
+#### Normalization with only 50 genes using Median of Ratios method
+
+```{r}
+## Filter out the 50 genes
+gene$symbol = mapIds(org.Hs.eg.db,
+                     keys=rownames(gene),
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+gene50 = gene[which(gene$symbol %in% pam50annot$probe),]
+rownames(gene50) = gene50$symbol
+
+normFactors = MedianNorm(gene50[-ncol(gene50)], alternative = FALSE) # The alternative method is similar to median-by-ratio normalization, but can deal with the cases when all of the genes/isoforms have at least one zero counts (in which case the median-by-ratio normalization will fail)
+gene_norm = apply(gene50[-ncol(gene50)], 1, function(x){x/normFactors})
+gene_norm = as.data.frame(t(gene_norm))
+gene50_t = t(gene_norm) %>% as.data.frame()
+
+PAM50Preds = molecular.subtyping(sbt.model = "pam50", 
+                                 data = gene50_t,
+                                 annot = pam50annot,
+                                 do.mapping = TRUE)
+
+# table(PAM50Preds$subtype)
+out_norm_50 = as.data.frame(PAM50Preds$subtype)
+colnames(out_norm_50) = "Normalized Data (50 genes)"
+```
+
+
+```{r}
+#### Other normalization methods
+```
+
+#### Result Comparison
+
+```{r}
+comb = cbind(out_raw, out_norm_all, out_norm_50)
+# nrow(comb[which(comb[,1]==comb[,2] & comb[,2]==comb[,3]),])
+# nrow(comb)
+
+comb %>%
+  mutate(`Normalized Data (50 genes)` = cell_spec(`Normalized Data (50 genes)`, 
+                                                  background=ifelse(`Normalized Data (50 genes)` != `Normalized Data (all genes)`, "pink", ifelse(`Normalized Data (50 genes)` != `Raw Data`, "skyblue", "white")))) %>%
+  mutate(`Normalized Data (all genes)` = cell_spec(`Normalized Data (all genes)`, 
+                                                   background=ifelse(`Normalized Data (all genes)` != `Raw Data`, "skyblue", "white"))) %>% 
+  kbl(booktabs = T, linesep = "", escape=FALSE) %>% 
+  kable_paper(full_width = F) %>%
+  kableExtra::scroll_box(width = "100%", height = "500px")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
